@@ -1,10 +1,49 @@
-/*jshint globalstrict:true */
+/*jshint globalstrict:true, forin:false */
 /*global angular:true */
 /*global Blob:false*/
 'use strict';
 
 angular.module('kibana.services', [])
-.service('fields', function(dashboard, $rootScope, $http) {
+.service('alertSrv', function($timeout) {
+  var self = this;
+
+  // List of all alert objects
+  this.list = [];
+
+  this.set = function(title,text,severity,timeout) {
+    var
+      _a = {
+        title: title || '',
+        text: text || '',
+        severity: severity || 'info',
+      },
+      _ca = angular.toJson(_a),
+      _clist = _.map(self.list,function(alert){return angular.toJson(alert);});
+
+    // If we already have this alert, remove it and add a new one
+    // Why do this instead of skipping the add because it resets the timer
+    if(_.contains(_clist,_ca)) {
+      _.remove(self.list,_.indexOf(_clist,_ca));
+    }
+
+    self.list.push(_a);
+    if (timeout > 0) {
+      $timeout(function() {
+        self.list = _.without(self.list,_a);
+      }, timeout);
+    }
+  };
+
+  this.clear = function(alert) {
+    self.list = _.without(self.list,alert);
+  };
+
+  this.clearAll = function() {
+    self.list = [];
+  };
+
+})
+.service('fields', function(dashboard, $rootScope, $http, alertSrv) {
   // Save a reference to this
   var self = this;
 
@@ -46,6 +85,15 @@ angular.module('kibana.services', [])
     var request = $http({
       url: config.elasticsearch + "/" + indices.join(',') + "/_mapping",
       method: "GET"
+    }).error(function(data, status, headers, conf) {
+      if(status === 0) {
+        alertSrv.set('Error',"Could not contact Elasticsearch at "+config.elasticsearch+
+          ". Please ensure that Elasticsearch is reachable from your system." ,'error');
+     } else {
+        alertSrv.set('Error',"No index found at "+config.elasticsearch+"/" +
+         indices.join(',')+"/_mapping. Please create at least one index."  +
+         "If you're using a proxy ensure it is configured correctly.",'error');
+      }
     });
 
     return request.then(function(p) {
@@ -79,11 +127,11 @@ angular.module('kibana.services', [])
         ret[propName] = obj;
       }
     }
-    return ret; 
+    return ret;
   };
 
 })
-.service('kbnIndex',function($http) {
+.service('kbnIndex',function($http,alertSrv) {
 
   // returns a promise containing an array of all indices matching the index
   // pattern that exist in a given range
@@ -106,8 +154,14 @@ angular.module('kibana.services', [])
     var something = $http({
       url: config.elasticsearch + "/_aliases",
       method: "GET"
-    }).error(function(data, status, headers, config) {
-      // Handle error condition somehow?
+    }).error(function(data, status, headers, conf) {
+      if(status === 0) {
+        alertSrv.set('Error',"Could not contact Elasticsearch at "+config.elasticsearch+
+          ". Please ensure that Elasticsearch is reachable from your system." ,'error');
+      } else {
+        alertSrv.set('Error',"Could not reach "+config.elasticsearch+"/_aliases. If you"+
+          " are using a proxy, ensure it is configured correctly",'error');
+      }
     });
 
     return something.then(function(p) {
@@ -199,11 +253,18 @@ angular.module('kibana.services', [])
     ids : [],
   });
 
-  // For convenience 
-  var ejs = ejsResource(config.elasticsearch);  
+  // Defaults for query objects
+  var _query = {
+    query: '*',
+    alias: '',
+    pin: false,
+    type: 'lucene'
+  };
+  // For convenience
+  var ejs = ejsResource(config.elasticsearch);
   var _q = dashboard.current.services.query;
 
-  this.colors = [ 
+  this.colors = [
     "#7EB26D","#EAB839","#6ED0E0","#EF843C","#E24D42","#1F78C1","#BA43A9","#705DA0", //1
     "#508642","#CCA300","#447EBC","#C15C17","#890F02","#0A437C","#6D1F62","#584477", //2
     "#B7DBAB","#F4D598","#70DBED","#F9BA8F","#F29191","#82B5D8","#E5A8E2","#AEA2E0", //3
@@ -221,7 +282,13 @@ angular.module('kibana.services', [])
     _q = dashboard.current.services.query;
     self.list = dashboard.current.services.query.list;
     self.ids = dashboard.current.services.query.ids;
-    
+
+    // Check each query object, populate its defaults
+    _.each(self.list,function(query,id) {
+      _.defaults(query,_query);
+      query.color = colorAt(id);
+    });
+
     if (self.ids.length === 0) {
       self.set({});
     }
@@ -237,16 +304,12 @@ angular.module('kibana.services', [])
         return false;
       }
     } else {
-      var _id = nextId();
-      var _query = {
-        query: '*',
-        alias: '',
-        color: colorAt(_id),
-        pin: false,
-        id: _id,
-        type: 'lucene'
-      };
+      var _id = query.id || nextId();
+      query.id = _id;
+      query.color = query.color || colorAt(_id);
       _.defaults(query,_query);
+
+
       self.list[_id] = query;
       self.ids.push(_id);
       return _id;
@@ -287,7 +350,7 @@ angular.module('kibana.services', [])
   };
 
   this.idsByMode = function(config) {
-    switch(config.mode) 
+    switch(config.mode)
     {
     case 'all':
       return self.ids;
@@ -320,14 +383,16 @@ angular.module('kibana.services', [])
 .service('filterSrv', function(dashboard, ejsResource) {
   // Create an object to hold our service state on the dashboard
   dashboard.current.services.filter = dashboard.current.services.filter || {};
-  _.defaults(dashboard.current.services.filter,{
+
+  // Defaults for it
+  var _d = {
     idQueue : [],
     list : {},
     ids : []
-  });
+  };
 
   // For convenience
-  var ejs = ejsResource(config.elasticsearch);  
+  var ejs = ejsResource(config.elasticsearch);
   var _f = dashboard.current.services.filter;
 
   // Save a reference to this
@@ -335,6 +400,9 @@ angular.module('kibana.services', [])
 
   // Call this whenever we need to reload the important stuff
   this.init = function() {
+    // Populate defaults
+    _.defaults(dashboard.current.services.filter,_d);
+
     // Accessors
     self.list = dashboard.current.services.filter.list;
     self.ids = dashboard.current.services.filter.ids;
@@ -347,7 +415,7 @@ angular.module('kibana.services', [])
 
   };
 
-  // This is used both for adding filters and modifying them. 
+  // This is used both for adding filters and modifying them.
   // If an id is passed, the filter at that id is updated
   this.set = function(filter,id) {
     _.defaults(filter,{mandate:'must'});
@@ -382,7 +450,7 @@ angular.module('kibana.services', [])
     var either_bool = ejs.BoolFilter().must(ejs.MatchAllFilter());
     _.each(ids,function(id) {
       if(self.list[id].active) {
-        switch(self.list[id].mandate) 
+        switch(self.list[id].mandate)
         {
         case 'mustNot':
           bool = bool.mustNot(self.getEjsObj(id));
@@ -502,15 +570,30 @@ angular.module('kibana.services', [])
   self.init();
 
 })
-.service('dashboard', function($routeParams, $http, $rootScope, $injector, ejsResource, timer, kbnIndex) {
+.service('dashboard', function($routeParams, $http, $rootScope, $injector, ejsResource, timer, kbnIndex, alertSrv) {
   // A hash of defaults to use when loading a dashboard
 
   var _dash = {
     title: "",
     style: "dark",
     editable: true,
+    failover: false,
     rows: [],
     services: {},
+    loader: {
+      save_gist: false,
+      save_elasticsearch: true,
+      save_local: true,
+      save_default: true,
+      save_temp: true,
+      save_temp_ttl_enable: true,
+      save_temp_ttl: '30d',
+      load_gist: true,
+      load_elasticsearch: true,
+      load_elasticsearch_size: 20,
+      load_local: true,
+      hide: false
+    },
     index: {
       interval: 'none',
       pattern: '_all',
@@ -519,7 +602,7 @@ angular.module('kibana.services', [])
   };
 
   // An elasticJS client to use
-  var ejs = ejsResource(config.elasticsearch);  
+  var ejs = ejsResource(config.elasticsearch);
   var gist_pattern = /(^\d{5,}$)|(^[a-z0-9]{10,}$)|(gist.github.com(\/*.*)\/[a-z0-9]{5,}\/*$)/;
 
   // Store a reference to this
@@ -538,9 +621,9 @@ angular.module('kibana.services', [])
 
   var route = function() {
     // Is there a dashboard type and id in the URL?
-    if(!(_.isUndefined($routeParams.type)) && !(_.isUndefined($routeParams.id))) {
-      var _type = $routeParams.type;
-      var _id = $routeParams.id;
+    if(!(_.isUndefined($routeParams.kbnType)) && !(_.isUndefined($routeParams.kbnId))) {
+      var _type = $routeParams.kbnType;
+      var _id = $routeParams.kbnId;
 
       switch(_type) {
       case ('elasticsearch'):
@@ -552,14 +635,17 @@ angular.module('kibana.services', [])
       case ('file'):
         self.file_load(_id);
         break;
+      case('script'):
+        self.script_load(_id);
+        break;
       default:
         self.file_load('default.json');
       }
 
     // No dashboard in the URL
     } else {
-      // Check if browser supports localstorage, and if there's a dashboard 
-      if (window.Modernizr.localstorage && 
+      // Check if browser supports localstorage, and if there's a dashboard
+      if (window.Modernizr.localstorage &&
         !(_.isUndefined(window.localStorage['dashboard'])) &&
         window.localStorage['dashboard'] !== ''
       ) {
@@ -568,11 +654,11 @@ angular.module('kibana.services', [])
       // No? Ok, grab default.json, its all we have now
       } else {
         self.file_load('default.json');
-      } 
+      }
     }
   };
 
-  // Since the dashboard is responsible for index computation, we can compute and assign the indices 
+  // Since the dashboard is responsible for index computation, we can compute and assign the indices
   // here before telling the panels to refresh
   this.refresh = function() {
     if(self.current.index.interval !== 'none') {
@@ -582,17 +668,29 @@ angular.module('kibana.services', [])
           self.current.index.pattern,self.current.index.interval
         ).then(function (p) {
           if(p.length > 0) {
-            self.indices = p;          
+            self.indices = p;
           } else {
-            self.indices = [self.current.index.default];
+            //TODO: Option to not failover
+            if(self.current.failover) {
+              self.indices = [self.current.index.default];
+            } else {
+
+              // Do not issue refresh if no indices match. This should be removed when panels
+              // properly understand when no indices are present
+              return false;
+            }
           }
           $rootScope.$broadcast('refresh');
         });
       } else {
-        // This is not optimal, we should be getting the entire index list here, or at least every
-        // index that possibly matches the pattern
-        self.indices = [self.current.index.default];
-        $rootScope.$broadcast('refresh');
+        if(self.current.failover) {
+          self.indices = [self.current.index.default];
+          $rootScope.$broadcast('refresh');
+        } else {
+          alertSrv.set("No time filter",
+            'Timestamped indices are configured without a failover. Waiting for time filter.',
+            'info',5000);
+        }
       }
     } else {
       self.indices = [self.current.index.default];
@@ -600,12 +698,20 @@ angular.module('kibana.services', [])
     }
   };
 
+  var dash_defaults = function(dashboard) {
+    _.defaults(dashboard,_dash);
+    _.defaults(dashboard.index,_dash.index);
+    _.defaults(dashboard.loader,_dash.loader);
+    return dashboard;
+  };
+
   this.dash_load = function(dashboard) {
+
     // Cancel all timers
     timer.cancel_all();
 
     // Make sure the dashboard being loaded has everything required
-    _.defaults(dashboard,_dash);
+    dashboard = dash_defaults(dashboard);
 
     // If not using time based indices, use the default index
     if(dashboard.index.interval === 'none') {
@@ -657,7 +763,7 @@ angular.module('kibana.services', [])
       return true;
     } else {
       return false;
-    }  
+    }
   };
 
   this.purge_default = function() {
@@ -680,32 +786,81 @@ angular.module('kibana.services', [])
     };
   };
 
+  var renderTemplate = function(json,params) {
+    var _r;
+    _.templateSettings = {interpolate : /\{\{(.+?)\}\}/g};
+    var template = _.template(json);
+    var rendered = template({ARGS:params});
+
+    try {
+      _r = angular.fromJson(rendered);
+    } catch(e) {
+      _r = false;
+    }
+    return _r;
+  };
+
   this.file_load = function(file) {
     return $http({
       url: "dashboards/"+file,
       method: "GET",
+      transformResponse: function(response) {
+        return renderTemplate(response,$routeParams);
+      }
     }).then(function(result) {
-      var _dashboard = result.data;
-      _.defaults(_dashboard,_dash);
-      self.dash_load(_dashboard);
+      if(!result) {
+        return false;
+      }
+
+      self.dash_load(dash_defaults(result.data));
       return true;
     },function(result) {
+      alertSrv.set('Error',"Could not load <i>dashboards/"+file+"</i>. Please make sure it exists" ,'error');
       return false;
     });
   };
 
   this.elasticsearch_load = function(type,id) {
-    var request = ejs.Request().indices(config.kibana_index).types(type);
-    var results = request.query(
-      ejs.IdsQuery(id)
-    ).doSearch();
-    return results.then(function(results) {
-      if(_.isUndefined(results)) {
-        return false;
-      } else {
-        self.dash_load(angular.fromJson(results.hits.hits[0]['_source']['dashboard']));
-        return true;
+    return $http({
+      url: config.elasticsearch + "/" + config.kibana_index + "/"+type+"/"+id,
+      method: "GET",
+      transformResponse: function(response) {
+        return renderTemplate(angular.fromJson(response)['_source']['dashboard'],$routeParams);
       }
+    }).error(function(data, status, headers, conf) {
+      if(status === 0) {
+        alertSrv.set('Error',"Could not contact Elasticsearch at "+config.elasticsearch+
+          ". Please ensure that Elasticsearch is reachable from your system." ,'error');
+      } else {
+        alertSrv.set('Error',"Could not find "+id+". If you"+
+          " are using a proxy, ensure it is configured correctly",'error');
+      }
+      return false;
+    }).success(function(data, status, headers) {
+      self.dash_load(data);
+    });
+  };
+
+  this.script_load = function(file) {
+    return $http({
+      url: "dashboards/"+file,
+      method: "GET",
+      transformResponse: function(response) {
+        /*jshint -W054 */
+        var _f = new Function("ARGS",response);
+        return _f($routeParams);
+      }
+    }).then(function(result) {
+      if(!result) {
+        return false;
+      }
+      self.dash_load(dash_defaults(result.data));
+      return true;
+    },function(result) {
+      alertSrv.set('Error',
+        "Could not load <i>scripts/"+file+"</i>. Please make sure it exists and returns a valid dashboard" ,
+        'error');
+      return false;
     });
   };
 
@@ -713,7 +868,7 @@ angular.module('kibana.services', [])
     // Clone object so we can modify it without influencing the existing obejct
     var save = _.clone(self.current);
     var id;
-    
+
     // Change title on object clone
     if (type === 'dashboard') {
       id = save.title = _.isUndefined(title) ? self.current.title : title;
@@ -726,10 +881,9 @@ angular.module('kibana.services', [])
       title: save.title,
       dashboard: angular.toJson(save)
     });
-    
+
     request = type === 'temp' && ttl ? request.ttl(ttl) : request;
 
-    // TOFIX: Implement error handling here
     return request.doIndex(
       // Success
       function(result) {
@@ -771,7 +925,6 @@ angular.module('kibana.services', [])
       );
   };
 
-  // TOFIX: Gist functionality
   this.save_gist = function(title,dashboard) {
     var save = _.clone(dashboard || self.current);
     save.title = title || self.current.title;
@@ -803,7 +956,7 @@ angular.module('kibana.services', [])
           var file = JSON.parse(v.content);
           files.push(file);
         } catch(e) {
-          // Nothing?
+          return false;
         }
       });
       return files;
@@ -811,5 +964,4 @@ angular.module('kibana.services', [])
       return false;
     });
   };
-
 });
