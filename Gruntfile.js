@@ -4,6 +4,7 @@ module.exports = function (grunt) {
 
   var config = {
     pkg: grunt.file.readJSON('package.json'),
+    aws: grunt.file.readJSON('.aws-config.json'),
     srcDir: 'src',
     destDir: 'dist',
     tempDir: 'tmp',
@@ -16,7 +17,7 @@ module.exports = function (grunt) {
     },
     clean: {
       on_start: ['<%= destDir %>', '<%= tempDir %>'],
-      after_require: ['<%= tempDir %>'],
+      temp: ['<%= tempDir %>'],
     },
     copy: {
       everthing_left_in_src: {
@@ -52,6 +53,17 @@ module.exports = function (grunt) {
         cwd:'<%= srcDir %>/vendor/bootstrap/less/',
         src: ['bootstrap.dark.less', 'bootstrap.light.less'],
         dest: '<%= tempDir %>/css/',
+      },
+      // Compile to src when not building
+      src:{
+        options: {
+          paths: ["<%= srcDir %>/vendor/bootstrap/less"],
+          yuicompress:true
+        },
+        files: {
+          "<%= srcDir %>/css/bootstrap.dark.min.css": "<%= srcDir %>/vendor/bootstrap/less/bootstrap.dark.less",
+          "<%= srcDir %>/css/bootstrap.light.min.css": "<%= srcDir %>/vendor/bootstrap/less/bootstrap.light.less"
+        }
       }
     },
     cssmin: {
@@ -149,6 +161,29 @@ module.exports = function (grunt) {
       me: {
         // Target-specific file lists and/or options go here.
       },
+    },
+    zip: {
+      dist: {
+        cwd: '<%= destDir %>',
+        src: ['<%= destDir %>/**/*','LICENSE.md','README.md'],
+        dest: '<%= tempDir %>/dist.zip'
+      }
+    },
+    s3: {
+      options: {
+        key: '<%= aws.key %>',
+        secret: '<%= aws.secret %>',
+        bucket: 'download.elasticsearch.org',
+        access: 'private'
+      },
+      dist: {
+        upload: [
+          {
+            src: '<%= tempDir %>/dist.zip',
+            dest: 'kibana/kibana/<%= pkg.name %>-latest.zip',
+          }
+        ]
+      }
     }
   };
 
@@ -198,6 +233,8 @@ module.exports = function (grunt) {
   config.requirejs.compile_temp.options.modules = requireModules;
 
   // load plugins
+  grunt.loadNpmTasks('grunt-s3');
+  grunt.loadNpmTasks('grunt-zip');
   grunt.loadNpmTasks('grunt-ngmin');
   grunt.loadNpmTasks('grunt-contrib-copy');
   grunt.loadNpmTasks('grunt-contrib-less');
@@ -214,19 +251,26 @@ module.exports = function (grunt) {
   grunt.initConfig(config);
 
   // Default task.
-  grunt.registerTask('default', ['jshint:source','less']);
+  grunt.registerTask('default', ['jshint:source','less:src']);
   grunt.registerTask('build', [
     'jshint:source',
     'clean:on_start',
     'htmlmin',
-    'less',
+    'less:dist',
     'cssmin',
     'copy:everthing_left_in_src',
     'ngmin',
     'requirejs:compile_temp',
-    'clean:after_require',
+    'clean:temp',
     'write_revision_to_dest', // runs git-describe and replace:config
     'uglify:dest'
+  ]);
+
+  grunt.registerTask('distribute', [
+    'build',
+    'zip:dist',
+    's3:dist',
+    'clean:temp'
   ]);
 
   grunt.registerTask('write_revision_to_dest', function() {
