@@ -1,6 +1,12 @@
+input,
+textarea,
+.uneditable-input .search-query {
+  width: 100%; 
+}
 .short-query {
   display:inline-block;
   margin-right: 10px;
+  width: 100%;
 }
 .begin-query {
   position:absolute;
