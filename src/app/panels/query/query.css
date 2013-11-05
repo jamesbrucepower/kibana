@@ -6,6 +6,9 @@ input.search-query {
   margin-right: 10px;
   width: 100%;
 }
+.short-query input.search-query {
+    width: 280px;
+}
 .begin-query {
   position:absolute;
   left:13px;
@@ -23,6 +26,11 @@ input.search-query {
   -moz-box-sizing: border-box;    /* Firefox, other Gecko */
   box-sizing: border-box;         /* Opera/IE 8+ */
 }
+
+.query-disabled {
+  opacity: 0.3;
+}
+
 .form-search:hover .has-remove {
   padding-left: 50px !important;
 }
